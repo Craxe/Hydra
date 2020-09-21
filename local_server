@@ -1,0 +1,340 @@
+// Библиотеки для сервера на ESP8266
+#include <ESP8266WiFi.h>                                // Подключаем библиотеку ESP8266WiFi
+#include <ESP8266WebServer.h>                           // Подключаем библиотеку ESP8266WebServer
+#include <ESP8266HTTPClient.h>                          // Подключаем библиотеку ESP8266HTTPClient
+#include <ESP8266mDNS.h>
+
+// Библиотека для LCD экрана
+#include <LiquidCrystal_I2C.h>                          // Подключаем библиотеку LiquidCrystal_I2C
+
+// Библиотеки для bme280
+#include <Wire.h>                                       // Подключаем библиотеку Wire
+#include <Adafruit_Sensor.h>                            // Подключаем библиотеку Adafruit_Sensor
+#include <Adafruit_BME280.h>                            // Подключаем библиотеку Adafruit_BME280
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// HTML код
+const char startPage[] PROGMEM = R"=====(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  .logo {
+  color: #6B5B95
+  }
+  .lcd {
+  color: red;
+  }
+</style>
+</head>
+
+<body> 
+<div id="demo" >
+<h1 class="logo">Craxe Industries</h1>
+</div>
+ 
+<div>
+<h3>Показания датчика</h3>
+<h4>
+Температура: <span id = "temperature">...</span>°C<br>
+Влажность: <span id = "humidity">...</span>%<br>
+Давление: <span id = "pressure">...</span>mmHg<br>
+</h4>
+</div>
+
+<div>
+ <h3>Режим экрана: <span id="mode">Показания</span></h3>
+ <button type="button" onclick="setMode(0)">Показания</button>
+ <button type="button" onclick="setMode(1)">Пейджер</button>
+ <button type="button" onclick="setMode(2)">IP</button><br>
+</div>
+
+<div>
+ <h3>Подсветка экрана: <span id="LEDState">ВКЛ</span></h3>
+ <button type="button" onclick="setLed(1)">Включить</button>
+ <button type="button" onclick="setLed(0)">Выключить</button><br>
+</div>
+
+<div>
+<h3>Текст для отправки на экран</h3>
+<h4> 1 строка: <input id="newString1" type="text">
+ <button type="button" onclick="setStr(1)">Отправить</button><br>
+ 2 строка: <input id="newString2" type="text">
+ <button type="button" onclick="setStr(2)">Отправить</button>
+</h4>
+</div>
+
+<div>
+ <h3>Текст пейджера:<br>
+ <span id="string1" class="lcd" >...</span><br>
+ <span id="string2" class="lcd" >...</span><br></h3>
+</div>
+
+<script>
+setInterval(function() {
+  getData();
+}, 10000);
+
+function setMode(LCDmode) {
+  var xhttp =  new XMLHttpRequest( );
+  xhttp.onreadystatechange =  function( ) {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("mode").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "setMode?mode="+ LCDmode, true);
+  xhttp.send( );
+}
+
+function setLed(led) {
+  var xhttp =  new XMLHttpRequest( );
+  xhttp.onreadystatechange =  function( ) {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("LEDState").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "setLED?LEDstate="+ led, true);
+  xhttp.send( );
+}
+
+function setStr(num) { 
+  var xhttp = new XMLHttpRequest(); 
+  let str; 
+  if (num == 1) 
+    str = document.getElementById("newString1").value; 
+  else 
+    str = document.getElementById("newString2").value; 
+  xhttp.onreadystatechange = function () { 
+    if (this.readyState == 4 && this.status == 200) { 
+      if (num == 1) {
+        document.getElementById("newString1").value = "";
+        document.getElementById("string1").innerHTML = str; 
+      }
+      else if (num == 2){ 
+        document.getElementById("newString2").value = ""; 
+        document.getElementById("string2").innerHTML = str; 
+      }
+    } 
+  }; 
+xhttp.open("GET", "setLCD?num=" + num + "&str=" + str, true); 
+xhttp.send(); 
+}
+
+function getData() {
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+  let data = JSON.parse(this.responseText);
+        document.getElementById("temperature").innerHTML = data.temperature;
+  document.getElementById("humidity").innerHTML = data.humidity;
+  document.getElementById("pressure").innerHTML = data.pressure;
+    }
+  };
+  xhttp.open("GET", "getData", true);
+  xhttp.send();
+}
+
+</script>
+</body>
+</html>
+)=====";
+
+///////////////////////////////////////////////////////////////////////////
+
+LiquidCrystal_I2C lcd(0x27,16,2);
+
+#define SEALEVELPRESSURE_HPA (1013.25)                  // Задаем высоту
+Adafruit_BME280 bme;
+
+float temperature = 0;
+float humidity = 0;
+float pressure = 0;
+
+String LCDmode = "2";
+String LCDstring1;
+String LCDstring2;
+
+String json;
+
+int numMillis = 0;
+
+String ssid = "KIRILL";
+String password = "0312760000";
+//const char* ssid = "KIRILL"; // Название сети
+//const char* password = "0312760000";
+IPAddress myIP; // Хранит IP адресс
+ESP8266WebServer server(80); // Объявление сервера и номер порта для общения
+
+void handleRoot(); // Объявления функции выплнения команды
+void handleData();
+void handleMode();
+void handleLED();
+void handleLCD();
+
+void setup() 
+{
+  lcd.begin();
+  lcd.backlight();
+
+  if (!bme.begin(0x76)) {                                // Инициализация датчика BME280
+     Serial.println("Could not find a valid BME280!");  // Печать сообщения об ошибки
+     while (1);
+   }
+  
+  Serial.begin(9600); delay(100); // Инициализация общения по COM порту
+
+  WiFi.persistent(false); // Не записывать параметры Wi-Fi в EEPROM
+  WiFi.disconnect(); WiFi.mode(WIFI_OFF); delay(500);  
+  WiFi.mode(WIFI_STA); // режим «точки доступа»
+
+  WiFi.setOutputPower(5); // Мощность передатчика: min=0, max=20.5
+  IPAddress staticIP(192,168,7,7); // Свой адрес IP
+  IPAddress gateway(192,168,7,7); // Адрес IP шлюза (если есть) (3 первых числа должны совпадать с IP)
+  IPAddress subnet(255,255,255,0); // Маска подсети
+  WiFi.begin(ssid, password);
+  WiFi.config(staticIP, gateway, subnet);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  myIP=WiFi.localIP();
+  Serial.print(myIP);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Local IP");
+  lcd.setCursor(0,1);
+  lcd.print(myIP);
+  //mdns.begin("craxe", WiFi.localIP());
+
+  //////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  server.on("/", handleRoot);
+  server.on("/setMode", handleMode);
+  server.on("/setLED", handleLED);
+  server.on("/setLCD", handleLCD);
+  server.on("/getData", handleData);
+
+  server.begin();  // Перезапустить сервер
+}
+
+WiFiClient client; // Создание клиента, который может соединяться с указанным IP
+
+void loop() 
+{
+  server.handleClient();
+  if((millis()-numMillis)>=10000)
+  {
+    numMillis=millis();
+    temperature = bme.readTemperature();
+    humidity = bme.readHumidity();
+    pressure = bme.readPressure()/100.0F*0.7500637554192F;
+  
+    if (LCDmode == "0")
+    {
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("T="); lcd.print(temperature,1); lcd.print((char)223); lcd.print("C ");
+      lcd.print("H="); lcd.print(humidity,1); lcd.print("%");
+      lcd.setCursor(0,1);
+      lcd.print("P="); lcd.print(pressure,1); lcd.print("mmHg");
+    }
+  }
+}
+
+void handleRoot()
+{
+  server.send(200, "text/html", startPage);
+}
+
+void handleData()
+{ 
+  json="{\n\"temperature\": ";
+  json+=temperature;
+  json+=",\n\"humidity\": ";
+  json+=humidity;
+  json+=",\n\"pressure\": ";
+  json+=pressure;
+  json+="\n}";
+  server.send(200,"application/json",json);
+}
+
+void handleMode()
+{
+  LCDmode = server.arg("mode");
+  if (LCDmode == "0")
+  {
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("T="); lcd.print(temperature,1); lcd.print((char)223); lcd.print("C ");
+    lcd.print("H="); lcd.print(humidity,1); lcd.print("%");
+    lcd.setCursor(0,1);
+    lcd.print("P="); lcd.print(pressure,1); lcd.print("mmHg");
+    
+    server.send(200,"text/plain","Показания");
+  }
+  else if (LCDmode == "1")
+  {
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print(LCDstring1);
+    lcd.setCursor(0,1);
+    lcd.print(LCDstring2);
+    
+    server.send(200, "text/plain", "Пейджер");
+  }
+  else if (LCDmode == "2")
+  {
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("Local IP");
+    lcd.setCursor(0,1);
+    lcd.print(myIP);
+    
+    server.send(200, "text/plain", "IP");
+  }
+  else server.send(200, "text/plain", "...");
+}
+
+void handleLED()
+{
+  if (server.arg("LEDstate")=="1")
+  {
+    lcd.backlight();
+    server.send(200, "text/plain", "ВКЛ");
+  }
+  else if (server.arg("LEDstate")=="0")
+  {
+    lcd.noBacklight();
+    server.send(200, "text/plain", "ВЫКЛ");
+  }
+}
+
+void handleLCD()
+{
+  if (server.arg("num")=="1")
+  {
+    LCDstring1=server.arg("str");
+    if (LCDmode=="1")
+    {
+      lcd.setCursor(0,0);
+      for (int i = 0; i <16;i++) lcd.print(' ');
+      lcd.setCursor(0,0);
+      lcd.print(LCDstring1);
+    }
+  }
+  else if (server.arg("num")=="2")
+  {
+    LCDstring2=server.arg("str");
+    if (LCDmode=="1")
+    {
+      lcd.setCursor(0,1);
+      for (int i = 0; i <16;i++) lcd.print(' ');
+      lcd.setCursor(0,1);
+      lcd.print(LCDstring2);
+    }
+  }
+  server.send(200, "text/plain", "");
+}
